@@ -1,251 +1,188 @@
 import sys
 import random
-from PyQt5.QtCore import Qt, QTimer, QPoint
-from PyQt5.QtWidgets import QApplication, QLabel, QWidget, QMenu, QAction, QVBoxLayout
-from PyQt5.QtGui import QCursor, QFont
+from PyQt5.QtCore import Qt, QTimer, QPoint, QRectF
+from PyQt5.QtWidgets import QApplication, QWidget, QMenu, QAction
+from PyQt5.QtGui import QPainter, QColor, QFont, QCursor
 
-class PomodoroDogPet(QWidget):
+class DriftyDogPet(QWidget):
     def __init__(self):
         super().__init__()
 
-        # 1. 윈도우 스타일 설정: 테두리 없음, 항상 위, 작업표시줄 제외, 배경 투명
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        # 투명 배경, 테두리 없음, 최상단 고정
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.SubWindow)
         self.setAttribute(Qt.WA_TranslucentBackground)
+        self.resize(110, 80)
 
-        # 2. 뽀모도로 설정 (기본: 집중 25분 / 휴식 5분)
+        # 뽀모도로 타이머 (집중 25분 / 휴식 5분)
         self.WORK_TIME = 25 * 60
         self.REST_TIME = 5 * 60
-        self.current_time = self.WORK_TIME
-        self.is_running = False
-        self.session_mode = "WORK"  # "WORK" (집중) 또는 "REST" (휴식)
+        self.pomo_seconds = self.WORK_TIME
+        self.is_running = True
+        self.mode = "WORK"
 
-        # 3. 강아지 상태 머신 (IDLE, WALK, SLEEP, FOLLOW)
-        self.state = "IDLE"
-        self.direction = 1  # 1: 오른쪽, -1: 왼쪽
-        self.walk_speed = 2
-        self.follow_speed = 4
+        # 물리 파라미터
+        self.x = 300.0
+        self.y = 200.0
+        self.vx = 2.0
+        self.vy = 0.0
+        self.gravity = 0.55
+        self.bounce = 0.45
+        self.friction = 0.98
 
-        # 4. UI 레이아웃 구성 (상단: 말풍선/타이머, 하단: 강아지 캐릭터)
-        layout = QVBoxLayout()
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(4)
+        # 인터랙션 상태
+        self.is_grabbed = False
+        self.last_cursor_pos = QPoint()
+        self.facing_right = True
 
-        # 상태 말풍선 & 시간 표시 라벨
-        self.bubble_label = QLabel(self)
-        self.bubble_label.setAlignment(Qt.AlignCenter)
-        self.bubble_label.setStyleSheet("""
-            background-color: rgba(255, 255, 255, 0.92);
-            color: #2c3e50;
-            border: 2px solid #f39c12;
-            border-radius: 12px;
-            padding: 4px 10px;
-            font-weight: bold;
-            font-size: 13px;
-        """)
+        # 스프라이트 프레임 (애니메이션 박동감)
+        self.anim_frame = 0
 
-        # 강아지 캐릭터 라벨
-        self.dog_label = QLabel(self)
-        self.dog_label.setAlignment(Qt.AlignCenter)
-        self.dog_label.setStyleSheet("font-size: 38px; background: transparent;")
+        # 메인 물리 및 루프 타이머 (60 FPS)
+        self.physics_timer = QTimer(self)
+        self.physics_timer.timeout.connect(self.update_physics)
+        self.physics_timer.start(16)
 
-        layout.addWidget(self.bubble_label)
-        layout.addWidget(self.dog_label)
-        self.setLayout(layout)
-
-        # 5. 화면 초기 위치 (화면 하단 우측)
-        screen = QApplication.primaryScreen().geometry()
-        self.screen_width = screen.width()
-        self.screen_height = screen.height()
-        self.move(self.screen_width - 240, self.screen_height - 180)
-
-        # 6. 타이머들 설정
-        # 뽀모도로 카운트다운 타이머 (1초 주기)
+        # 뽀모도로 카운트다운 (1초 주기)
         self.pomo_timer = QTimer(self)
-        self.pomo_timer.timeout.connect(self.tick_timer)
+        self.pomo_timer.timeout.connect(self.tick_pomo)
+        self.pomo_timer.start(1000)
 
-        # 애니메이션/이동 주기 타이머 (50ms 주기)
-        self.anim_timer = QTimer(self)
-        self.anim_timer.timeout.connect(self.update_movement)
-        self.anim_timer.start(50)
-
-        # 랜덤 행동 변경 타이머 (4초 주기)
-        self.behavior_timer = QTimer(self)
-        self.behavior_timer.timeout.connect(self.decide_random_behavior)
-        self.behavior_timer.start(4000)
-
-        # 마우스 드래그 이동을 위한 변수
-        self.drag_position = QPoint()
-
-        self.update_ui()
+        self.move(int(self.x), int(self.y))
         self.show()
 
-    # --- 뽀모도로 타이머 로직 ---
-    def tick_timer(self):
-        if self.current_time > 0:
-            self.current_time -= 1
-        else:
-            # 시간 종료 시 세션 전환
-            if self.session_mode == "WORK":
-                self.session_mode = "REST"
-                self.current_time = self.REST_TIME
-                self.state = "WALK"  # 휴식 시간엔 기분 좋아서 산책 모드
-            else:
-                self.session_mode = "WORK"
-                self.current_time = self.WORK_TIME
-                self.state = "SLEEP" # 다시 집중 시간엔 조용히 잠자기
+    def tick_pomo(self):
+        if self.is_running and self.pomo_seconds > 0:
+            self.pomo_seconds -= 1
+        elif self.pomo_seconds <= 0:
+            # 시간 다 되면 세션 전환
+            self.mode = "REST" if self.mode == "WORK" else "WORK"
+            self.pomo_seconds = self.REST_TIME if self.mode == "REST" else self.WORK_TIME
+            # 휴식 시간엔 높이 뜀!
+            self.vy = -12
 
-        self.update_ui()
+    def update_physics(self):
+        self.anim_frame += 1
 
-    def toggle_timer(self):
-        if self.is_running:
-            self.pomo_timer.stop()
-            self.is_running = False
-        else:
-            self.pomo_timer.start(1000)
-            self.is_running = True
-        self.update_ui()
+        # 작업표시줄을 감안한 가용 화면 영역
+        screen_geo = QApplication.primaryScreen().availableGeometry()
+        floor = screen_geo.height() - self.height()
+        wall_right = screen_geo.width() - self.width()
 
-    def reset_timer(self):
-        self.pomo_timer.stop()
-        self.is_running = False
-        self.session_mode = "WORK"
-        self.current_time = self.WORK_TIME
-        self.state = "IDLE"
-        self.update_ui()
+        if not self.is_grabbed:
+            # 중력 적용
+            self.vy += self.gravity
+            self.x += self.vx
+            self.y += self.vy
 
-    # --- 행동 및 외형 업데이트 ---
-    def update_ui(self):
-        # 1) 시간 포맷팅 (MM:SS)
-        mins = self.current_time // 60
-        secs = self.current_time % 60
-        time_str = f"{mins:02d}:{secs:02d}"
+            # 바닥 충돌 처리
+            if self.y >= floor:
+                self.y = floor
+                if abs(self.vy) > 2.5:
+                    self.vy = -self.vy * self.bounce
+                else:
+                    self.vy = 0
+                    # 바닥에 있을 때 자율 주행 및 방황
+                    if random.random() < 0.02:
+                        self.vx = random.choice([-2.5, -1.8, 0, 1.8, 2.5])
 
-        mode_badge = "🔥집중" if self.session_mode == "WORK" else "☕휴식"
-        run_status = "▶" if self.is_running else "❚❚"
+            # 좌우 벽 충돌 처리
+            if self.x <= 0:
+                self.x = 0
+                self.vx = -self.vx * self.bounce
+            elif self.x >= wall_right:
+                self.x = wall_right
+                self.vx = -self.vx * self.bounce
 
-        # 2) 상태별 말풍선 대사 & 캐릭터 표정
-        if self.state == "FOLLOW":
-            status_text = "주인님 놀아줘!"
-            pet_sprite = "🐶💨"
-        elif self.state == "SLEEP":
-            status_text = "조용히 코자는 중..."
-            pet_sprite = "💤 🐕"
-        elif self.state == "WALK":
-            status_text = "총총 순찰 중~"
-            pet_sprite = "🐾 🐕" if self.direction == 1 else "🐕 🐾"
-        else:  # IDLE
-            if self.session_mode == "WORK" and self.is_running:
-                status_text = "열심히 열공 중!"
-                pet_sprite = "👓 🐶"
-            else:
-                status_text = "우클릭: 메뉴 열기"
-                pet_sprite = "🐶"
+            # 감속 마찰
+            self.vx *= self.friction
+            if abs(self.vx) > 0.3:
+                self.facing_right = self.vx > 0
 
-        # 말풍선 텍스트 갱신
-        self.bubble_label.setText(f"[{mode_badge} {time_str} {run_status}]\n{status_text}")
-        self.dog_label.setText(pet_sprite)
+            self.move(int(self.x), int(self.y))
 
-        self.adjustSize()
+        self.update()
 
-    def decide_random_behavior(self):
-        # 마우스를 따라가는 중이거나 드래그 중엔 상태 변경 안 함
-        if self.state == "FOLLOW":
-            return
-
-        # 집중 세션 중일 때는 방해되지 않게 자거나(SLEEP), 얌전히(IDLE) 있는 확률 높임
-        if self.session_mode == "WORK" and self.is_running:
-            self.state = random.choices(["SLEEP", "IDLE", "WALK"], weights=[60, 30, 10])[0]
-        else:
-            # 휴식 시간 또는 대기 중일 때는 활발하게 산책
-            self.state = random.choices(["WALK", "IDLE", "SLEEP"], weights=[50, 30, 20])[0]
-
-        self.direction = random.choice([-1, 1])
-        self.update_ui()
-
-    def update_movement(self):
-        x, y = self.x(), self.y()
-
-        # 1) 산책(WALK) 상태: 좌우로 이동
-        if self.state == "WALK":
-            x += self.direction * self.walk_speed
-            # 화면 좌우 경계 도달 시 방향 전환
-            if x <= 10:
-                self.direction = 1
-            elif x >= self.screen_width - self.width() - 10:
-                self.direction = -1
-            self.move(x, y)
-
-        # 2) 마우스 따라오기(FOLLOW) 상태
-        elif self.state == "FOLLOW":
-            target = QCursor.pos()
-            dx = target.x() - (x + self.width() // 2)
-            dy = target.y() - (y + self.height() // 2)
-
-            # 마우스에 도달하면 만족하고 대기(IDLE)로 전환
-            if abs(dx) < 20 and abs(dy) < 20:
-                self.state = "IDLE"
-                self.update_ui()
-            else:
-                step_x = self.follow_speed if dx > 0 else -self.follow_speed
-                step_y = self.follow_speed if dy > 0 else -self.follow_speed
-                self.move(x + int(step_x), y + int(step_y))
-
-    # --- 마우스 클릭 & 메뉴 조작 ---
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            # 좌클릭: 마우스를 쫓아오게 하거나 드래그 준비
-            self.state = "FOLLOW"
-            self.drag_position = event.globalPos() - self.frameGeometry().topLeft()
-            self.update_ui()
-
+            self.is_grabbed = True
+            self.last_cursor_pos = QCursor.pos()
+            self.vx = 0
+            self.vy = 0
         elif event.button() == Qt.RightButton:
-            # 우클릭: 뽀모도로 제어 팝업 메뉴 열기
-            self.show_context_menu(event.globalPos())
+            self.show_menu(event.globalPos())
 
     def mouseMoveEvent(self, event):
-        # 마우스로 꾹 눌러서 끌어다 원하는 곳에 놓기
-        if event.buttons() == Qt.LeftButton:
-            self.move(event.globalPos() - self.drag_position)
+        if self.is_grabbed:
+            current_cursor = QCursor.pos()
+            delta = current_cursor - self.last_cursor_pos
 
-    def show_context_menu(self, global_pos):
+            # 마우스로 잡고 휘두른 속도 기록
+            self.vx = delta.x() * 0.7
+            self.vy = delta.y() * 0.7
+
+            self.x += delta.x()
+            self.y += delta.y()
+            self.move(int(self.x), int(self.y))
+            self.last_cursor_pos = current_cursor
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self.is_grabbed:
+            self.is_grabbed = False
+            # 던져진 관성 적용 (너무 빠르면 제한)
+            self.vx = max(-18, min(18, self.vx))
+            self.vy = max(-18, min(18, self.vy))
+
+    def show_menu(self, pos):
         menu = QMenu(self)
-
-        # 타이머 시작/일시정지
-        action_toggle = QAction("타이머 일시정지" if self.is_running else "타이머 시작", self)
-        action_toggle.triggered.connect(self.toggle_timer)
-        menu.addAction(action_toggle)
-
-        # 초기화
-        action_reset = QAction("타이머 리셋", self)
-        action_reset.triggered.connect(self.reset_timer)
-        menu.addAction(action_reset)
-
+        toggle_txt = "타이머 일시정지" if self.is_running else "타이머 재개"
+        action_toggle = menu.addAction(toggle_txt)
+        action_reset = menu.addAction("타이머 25분 리셋")
         menu.addSeparator()
+        action_quit = menu.addAction("강아지 보내기 (종료)")
 
-        # 세션 강제 전환
-        action_switch = QAction("집중/휴식 모드 강제 전환", self)
-        action_switch.triggered.connect(self.force_switch_mode)
-        menu.addAction(action_switch)
+        chosen = menu.exec_(pos)
+        if chosen == action_toggle:
+            self.is_running = not self.is_running
+        elif chosen == action_reset:
+            self.pomo_seconds = self.WORK_TIME
+            self.mode = "WORK"
+        elif chosen == action_quit:
+            self.close()
 
-        menu.addSeparator()
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
 
-        # 프로그램 종료
-        action_quit = QAction("종료", self)
-        action_quit.triggered.connect(self.close)
-        menu.addAction(action_quit)
+        # 1. 뽀모도로 미니멀 인디케이터 (머리 위 작은 캡슐)
+        mins = self.pomo_seconds // 60
+        secs = self.pomo_seconds % 60
+        time_text = f"{mins:02}:{secs:02}"
 
-        menu.exec_(global_pos)
+        bg_color = QColor(245, 120, 80, 220) if self.mode == "WORK" else QColor(46, 204, 113, 220)
+        painter.setBrush(bg_color)
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(QRectF(15, 2, 80, 18), 9, 9)
 
-    def force_switch_mode(self):
-        if self.session_mode == "WORK":
-            self.session_mode = "REST"
-            self.current_time = self.REST_TIME
+        painter.setPen(QColor("white"))
+        font = QFont("Arial", 8, QFont.Bold)
+        painter.setFont(font)
+        painter.drawText(QRectF(15, 2, 80, 18), Qt.AlignCenter, f"{'🔥' if self.mode == 'WORK' else '☕'} {time_text}")
+
+        # 2. 강아지 본체 렌더링
+        dog_font = QFont("Segoe UI Emoji", 30)
+        painter.setFont(dog_font)
+
+        # 상태별 애니메이션 텍스트
+        if self.is_grabbed:
+            sprite = "🐶"  # 들려있을 때
+        elif abs(self.vy) > 2.0:
+            sprite = "🐕"  # 점프/낙하 중
+        elif abs(self.vx) > 0.8:
+            # 걷는 모션 틱
+            sprite = "🐕" if (self.anim_frame // 10) % 2 == 0 else "🐾"
         else:
-            self.session_mode = "WORK"
-            self.current_time = self.WORK_TIME
-        self.update_ui()
+            sprite = "🐶" if (self.anim_frame // 30) % 2 == 0 else "💤"
 
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    pet = PomodoroDogPet()
-    sys.exit(app.exec_())
+        # 좌우 반전 느낌을 위한 위치 조정
+        text_rect = QRectF(10, 20, 90, 55)
+        painter.drawText(text_rect, Qt.AlignCenter, sprite)
